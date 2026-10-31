@@ -1,0 +1,13 @@
+/target/
+
+# Local credentials and collected data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/data/
+*.sbe
+*.log
+.DS_Store
+/.secrets/
