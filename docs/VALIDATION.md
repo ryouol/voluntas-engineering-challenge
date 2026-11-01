@@ -1,13 +1,18 @@
 # Validation
 
 Tested on macOS with Rust 1.92. All **39 tests**, formatting, and Clippy with warnings
-denied pass. Tests use disposable keys and a local HTTP/WebSocket exchange.
+denied pass, rechecked November 1, 2026. Tests use disposable keys and a local
+HTTP/WebSocket exchange. The latest pass also verifies exchange-time precedence
+and receive timestamps through the decoded SBE output.
 
 Coverage includes exact book arithmetic, empty/replacement snapshots, sequence gaps,
 rapid reactivation, socket ownership handoffs under backpressure, subscription batches,
 lifecycle bursts, failed discovery, output framing, verifier rejection, and shutdown.
 
-## Final implementation: four-minute live run
+## Initial submission: four-minute live run
+
+Measured on the implementation published in `74c3bde`. The November 1 code change
+clarifies service-task error propagation; it preserves the collection behavior.
 
 | Measurement | Result |
 | --- | ---: |
