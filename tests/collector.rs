@@ -23,6 +23,7 @@ async fn pagination_and_failure_are_not_partial_success() {
 async fn live_mock_recovery_lifecycle_and_independent_replay() {
     let (s, c, _temp, server) = setup().await;
     let output = c.output.clone().unwrap();
+    let started = chrono::Utc::now();
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(engineering_challenge::collector::run(c, cancel.clone()));
     wait_until(|| s.snapshots.lock().unwrap().len() == 2).await;
@@ -54,6 +55,7 @@ async fn live_mock_recovery_lifecycle_and_independent_replay() {
         .unwrap()
         .unwrap();
     assert!(s.closes.load(Ordering::Relaxed) >= 3);
+    let finished = chrono::Utc::now();
     let mut reader = AlignedSbeReader::<OrderbookSchema>::open(output).unwrap();
     let mut quantity = std::collections::HashMap::new();
     let mut snapshots = std::collections::HashMap::<String, usize>::new();
@@ -62,6 +64,8 @@ async fn live_mock_recovery_lifecycle_and_independent_replay() {
         match m {
             AnyMessage::Snapshot(m) => {
                 let m = SnapshotDomain::try_from_decoder(m).unwrap();
+                assert_eq!(m.exchange_timestamp.timestamp_millis(), 1_700_000_000_000);
+                assert!((started..=finished).contains(&m.received_at));
                 assert_eq!(m.asks[0].price_level, 630000);
                 assert_eq!(m.asks[0].quantity, 12500000);
                 quantity.insert(m.symbol.clone(), m.bids[0].quantity);
@@ -69,6 +73,9 @@ async fn live_mock_recovery_lifecycle_and_independent_replay() {
             }
             AnyMessage::PriceLevelUpdate(m) => {
                 let m = PriceLevelUpdateDomain::try_from_decoder(m).unwrap();
+                // The fixture's sending time is one millisecond later than its event time.
+                assert_eq!(m.exchange_timestamp.timestamp_millis(), 1_700_000_000_000);
+                assert!((started..=finished).contains(&m.backtest_timestamp));
                 let previous = quantity
                     .get_mut(&m.symbol)
                     .expect("snapshot must precede update");

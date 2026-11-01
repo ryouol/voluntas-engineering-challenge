@@ -100,7 +100,9 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<()> {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
                 joined = tasks.join_next() => {
-                    joined.context("service tasks stopped")???;
+                    let task = joined.context("service tasks stopped")?;
+                    let outcome = task.context("service task panicked")?;
+                    outcome?;
                     if cancel.is_cancelled() { return Ok(()); }
                     anyhow::bail!("service stopped unexpectedly");
                 }
