@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Approach, tradeoffs, and a local walkthrough of Roy Luo's Kalshi order-book collector for the Voluntas engineering challenge.">
+  <title>Kalshi collector — approach and walkthrough</title>
+  <style>
+    :root { color-scheme: light; --ink: #172638; --muted: #526174; --line: #dce3eb; --blue: #1559b7; --paper: #f5f8fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: white; font: 17px/1.65 system-ui, sans-serif; }
+    main { max-width: 960px; margin: auto; padding: 48px 28px 72px; }
+    header { padding-bottom: 28px; border-bottom: 1px solid var(--line); }
+    .eyebrow { color: var(--muted); font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: 12px 0 16px; font-size: clamp(32px, 5vw, 48px); line-height: 1.15; letter-spacing: -.035em; }
+    h2 { margin: 44px 0 12px; font-size: 26px; line-height: 1.3; }
+    h3 { margin: 24px 0 8px; font-size: 19px; }
+    p { max-width: 78ch; margin: 12px 0; }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    a:focus-visible { outline: 3px solid var(--blue); outline-offset: 4px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 24px; font-size: 15px; }
+    code { font: .88em ui-monospace, SFMono-Regular, Consolas, monospace; }
+    :not(pre) > code { padding: 2px 4px; background: var(--paper); border-radius: 3px; overflow-wrap: anywhere; }
+    pre { padding: 18px 20px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; line-height: 1.55; }
+    li { margin: 6px 0; }
+    .flow { display: grid; gap: 10px; padding: 20px; margin: 24px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); text-align: center; }
+    .step { padding: 12px; background: white; border: 1px solid var(--line); border-radius: 5px; }
+    .workers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .step small { display: block; color: var(--muted); font-size: 13px; }
+    .arrow { color: var(--muted); line-height: 1; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--paper); }
+    .note { border-left: 3px solid var(--blue); padding: 4px 0 4px 18px; }
+    footer { margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+    @media (max-width: 540px) { main { padding: 28px 18px 48px; } .workers { grid-template-columns: 1fr; } th, td { padding: 9px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Roy Luo · Voluntas engineering challenge</div>
+    <h1>Collect the feed.<br>Keep the books correct.</h1>
+    <p>I built a Rust collector for all live regular Kalshi markets, using Voluntas's supplied SBE template. The submission focuses on the core challenge: market discovery, ordered book updates, minute snapshots, and a clean shutdown.</p>
+    <nav aria-label="Page navigation">
+      <a href="#approach">Approach</a><a href="#tradeoffs">Tradeoffs</a><a href="#run">Run it locally</a><a href="#verification">Verification</a><a href="#next">Extension idea</a>
+      <a href="https://github.com/ryouol/voluntas-engineering-challenge">Source on GitHub ↗</a>
+    </nav>
+  </header>
+
+  <section id="approach">
+    <h2>The approach</h2>
+    <p>I started from the <a href="https://github.com/voluntas-io/engineering-challenge-template">official template</a> and kept its schemas and reader. I adapted its writer to accept stdout or a file while preserving the existing chunk format. The collector is split around ownership: one task owns each connection and its books; one writer owns the output stream.</p>
+    <div class="flow" role="img" aria-label="REST discovery and lifecycle events feed a coordinator. The coordinator assigns different markets to WebSocket workers. Each worker owns its books and sends records through a bounded queue to one SBE writer.">
+      <div class="step">REST discovery + lifecycle events<small>Which regular markets are live?</small></div>
+      <div class="arrow" aria-hidden="true">↓</div>
+      <div class="step">Subscription coordinator<small>Stable ownership, additions, removals</small></div>
+      <div class="arrow" aria-hidden="true">↓</div>
+      <div class="workers">
+        <div class="step">Socket A<small>Its markets + books</small></div>
+        <div class="step">Socket B<small>Its markets + books</small></div>
+        <div class="step">Socket …<small>Its markets + books</small></div>
+      </div>
+      <div class="arrow" aria-hidden="true">↓</div>
+      <div class="step">Bounded queue → supplied SBE writer<small>Binary stdout or file; diagnostics on stderr</small></div>
+    </div>
+
+    <h3>1. Discover membership safely</h3>
+    <p>REST discovery follows every page with <code>mve_filter=exclude</code>. A full scan runs on a 60-second schedule, alongside lifecycle notifications. A failed scan retains the previous membership set. New lifecycle observations override stale scan results, so a slow scan cannot undo a more recent activation or closure.</p>
+
+    <h3>2. Balance markets and preserve ownership</h3>
+    <p>New markets go to the socket with the fewest assigned markets; existing assignments stay stable. The configurable target starts at 100 markets per socket and grows to fit the configured connection budget. At least two data sockets are used when multiple markets exist. These are application defaults, not claims about an exchange limit.</p>
+    <p>If a market changes owners, the coordinator waits until its old owner has finished queuing records before allowing the new owner to start. This prevents old updates from arriving after a new snapshot in the output.</p>
+
+    <h3>3. Apply exact, ordered book changes</h3>
+    <p>Prices and quantities are integers in millionths. A NO bid becomes a YES ask at <code>1 − price</code>. Signed exchange changes update the local book; emitted quantities are absolute. Zero deletes the price level.</p>
+    <pre><code>NO bid:     price 0.37, quantity 12.50
+YES ask:    price 0.63, quantity 12.50
+Delta:                 quantity −2.50
+SBE update: price 630000, quantity 10000000</code></pre>
+    <p>A snapshot must arrive before deltas can be applied. Sequence numbers are checked per subscription, including when several markets share one sequence. A gap or disconnect discards that socket's books and rebuilds them from fresh snapshots.</p>
+
+    <h3>4. Produce output that can be checked</h3>
+    <p>The collector emits initial snapshots, recovery snapshots, updates, and snapshots every 60 seconds. Local receive time is captured before JSON parsing. Exchange time is stored separately; Unix epoch zero means the exchange supplied no timestamp.</p>
+    <p>The bounded queue slows producers when output falls behind and reports a sustained stall as an error. Ctrl-C stops producers, closes connections, drains accepted records, and flushes the writer. The separate verifier reads the supplied format and independently replays updates.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2>Tradeoffs kept explicit</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">Choice</th><th scope="col">Why</th><th scope="col">Limit</th></tr></thead>
+        <tbody>
+          <tr><td>Stable market-count balancing</td><td>Simple ownership and fewer resubscriptions</td><td>Equal market counts do not imply equal traffic.</td></tr>
+          <tr><td>One active owner per market</td><td>Ordered state and output</td><td>Reconnects restore current state, not missed history.</td></tr>
+          <tr><td>Supplied 64 MiB chunk framing</td><td>Compatible with the provided reader</td><td>Partial flushes pad a full chunk, even in a small demo.</td></tr>
+          <tr><td>Periodic scans plus lifecycle events</td><td>Prompt changes with reconciliation</td><td>Paginated discovery is not an atomic exchange snapshot.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Redundant feeds, activity-based subscription monitoring, multi-exchange adapters, and latency experiments are outside this submission. Timer jitter and recovery gaps are documented rather than hidden.</p>
+  </section>
+
+  <section id="run">
+    <h2>Run it locally</h2>
+    <p>This is a command-line collector. The terminal shows status; market records go to a binary file that the verifier can read. This documentation page does not connect to Kalshi or receive credentials.</p>
+    <p>First follow the <a href="https://github.com/ryouol/voluntas-engineering-challenge#setup-and-run">README setup</a> for Rust and a local read-only Kalshi key. From the repository root:</p>
+    <pre><code>cargo build --release --locked
+mkdir -p data
+./target/release/engineering-challenge \
+  --markets-per-socket 1000 \
+  --run-seconds 180 \
+  --output data/walkthrough.sbe</code></pre>
+    <p>This subscribes to the full regular-market universe and stops after three minutes. Use a new filename each time; file output refuses to overwrite an existing capture. For a smaller smoke test, add <code>--symbols TICKER</code> with a currently active ticker. Ctrl-C also requests a graceful stop.</p>
+    <p>For stdout, omit <code>--output</code> and redirect with <code>&gt; data/walkthrough.sbe</code>. Logs remain visible on stderr.</p>
+    <h3>Read the status line</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">Field</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>desired</code></td><td>Live markets selected by discovery.</td></tr>
+          <tr><td><code>acknowledged</code></td><td>Markets whose subscriptions the exchange has acknowledged.</td></tr>
+          <tr><td><code>valid</code></td><td>Markets with a usable snapshot and book state.</td></tr>
+          <tr><td><code>sockets / reconnects</code></td><td>Nonempty assigned data shards / data-connection recovery attempts.</td></tr>
+          <tr><td><code>snapshots / deltas</code></td><td>Records produced, counted immediately before queueing.</td></tr>
+          <tr><td><code>written / queue</code></td><td>Records encoded by the writer / queued records. Encoded does not mean flushed to disk yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>After startup, look for <code>desired = acknowledged = valid</code>. Watch updates grow and snapshots advance each minute. Equality is a coverage observation, not proof that every exchange event arrived.</p>
+    <h3>Replay the finished capture</h3>
+    <pre><code>./target/release/verify data/walkthrough.sbe</code></pre>
+    <p>The JSON report counts markets, updates, and snapshots; checks replayed books against later snapshots; and reports snapshot timing. New exchange snapshots can legitimately replace state. Review replacement counts alongside the reconnect log rather than treating every replacement as a replay failure.</p>
+  </section>
+
+  <section id="verification">
+    <h2>Verification</h2>
+    <p>Automated checks cover exact decimals, signed changes, deletion, replacement snapshots, pagination failures, membership changes, sequence gaps, reconnects, ownership handoffs, slow output, broken pipes, minute checkpoints, and SIGINT. Tests use a local exchange fixture and disposable keys.</p>
+    <pre><code>cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked -- --include-ignored</code></pre>
+    <p>See the <a href="https://github.com/ryouol/voluntas-engineering-challenge/blob/main/docs/VALIDATION.md">validation record</a> for measured results and the revision tested. The initial submission passed 39 tests; its four-minute live run captured 3.08 million updates across 178,095 markets. The earlier 15-minute run and that final run are recorded separately.</p>
+    <h3 id="review">A reading order for code review</h3>
+    <p>The complete submission is larger than a small change. These slices follow the dependencies; each can be understood with its adjacent tests before moving to the next.</p>
+    <ol>
+      <li><code>util/aligned_sbe_writer.rs</code>: the smallest independent change; preserve framing and the original file API.</li>
+      <li><code>book.rs</code> and <code>output.rs</code>: exact arithmetic, canonical sides, and the record queue.</li>
+      <li><code>config.rs</code>, <code>auth.rs</code>, and <code>discovery.rs</code>: configuration, signing, and market membership.</li>
+      <li><code>feed.rs</code>: subscription commands, acknowledgments, sequence checks, and book validity.</li>
+      <li><code>socket.rs</code>: connection recovery, checkpoint timing, and release of market ownership.</li>
+      <li><code>collector.rs</code> and <code>main.rs</code>: assignment, service coordination, and graceful shutdown.</li>
+      <li><code>bin/verify.rs</code>: independent replay and timing statistics.</li>
+      <li><code>tests/common</code> and integration tests: local exchange, recovery/replay, discovery races, scale, stdout, and SIGINT.</li>
+    </ol>
+  </section>
+
+  <section id="next">
+    <h2>A connection to my WLA project</h2>
+    <p>My <a href="https://github.com/ryouol/wla-distibutor">Weighted Log Analyzer Distributor</a> routes log packets using configured analyzer weights, health checks, and retries. The subscription-monitoring extension raises a related question: how do we notice when a connection is falling behind or a subscription has gone unexpectedly quiet?</p>
+    <p>A possible next step would measure per-market activity and connection delay, distinguish naturally quiet markets from suspicious stalls, and use those observations to guide resubscription and workload distribution. Any balancing would move whole market subscriptions with an ordered handoff. Per-packet weighted random routing would not preserve the ownership model used here.</p>
+    <p class="note">This is a proposed direction, not implemented functionality. The collector was designed from the challenge requirements; it does not reuse WLA code. Traffic imbalance should be measured before adding adaptive balancing.</p>
+  </section>
+
+  <footer>
+    <a href="https://voluntas.io/engineering-challenge">Challenge specification</a> ·
+    <a href="https://github.com/voluntas-io/engineering-challenge-template">Original template</a> ·
+    <a href="https://github.com/ryouol/voluntas-engineering-challenge">Submission repository</a>
+  </footer>
+</main>
+</body>
+</html>
