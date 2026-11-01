@@ -5,7 +5,7 @@ built on the [provided SBE template](https://github.com/voluntas-io/engineering-
 Collects all live regular markets, excludes MVEs, and writes order-book updates and
 minute snapshots to stdout. Extensions are outside the scope of this submission.
 
-[Approach and local walkthrough](https://ryouol.github.io/voluntas-engineering-challenge/)
+[Approach and local walkthrough](docs/APPROACH.md)
 explains the design, status output, tradeoffs, and a possible connection to my WLA project.
 
 ## Setup and run
@@ -55,7 +55,7 @@ Start with `src/book.rs` and `src/feed.rs` for book and subscription logic.
 `discovery.rs`, `socket.rs`, and `collector.rs` handle membership, connections, and
 coordination; `output.rs` uses the supplied writer. Tests live beside modules in
 `*_tests.rs` files and use the local exchange fixture in `tests/common`.
-For a dependency-ordered review, follow the [reading map](https://ryouol.github.io/voluntas-engineering-challenge/#review).
+For a dependency-ordered review, follow the [reading map](docs/APPROACH.md#reading-order-for-code-review).
 
 ## Tests and validation
 
