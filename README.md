@@ -67,7 +67,7 @@ cargo test --locked -- --include-ignored
 
 All 39 tests pass, including the 65-second checkpoint test, independent replay,
 subscription churn, recovery, stdout decoding, broken pipes, and SIGINT.
-The final four-minute live run captured 3.08 million updates across 178,095 markets.
+The latest 20-minute live run captured 23.68 million updates across 171,875 markets.
 See [validation results](docs/VALIDATION.md).
 
 ## Limitations
